@@ -1,0 +1,10 @@
+# Core audio I/O and numerical processing
+sounddevice>=0.4.6
+numpy>=1.21.0
+
+# Windows system volume control (pycaw requires comtypes)
+pycaw>=20220319
+comtypes>=1.1.14
+
+# macOS and Linux volume control use built-in osascript / amixer / pactl,
+# so no extra Python packages are required for those platforms.
