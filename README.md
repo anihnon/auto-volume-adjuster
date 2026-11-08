@@ -227,6 +227,21 @@ If the test fails, try running the script as **Administrator** (Windows) or with
 
 ---
 
+## Change Settings While Running
+
+While the script is running, press **`s`** at any time to open the settings menu. The script will pause auto-adjustment and let you change:
+
+- **Neutral dBFS** — The ambient noise level where no adjustment happens
+- **Max step %** — Maximum volume change per cycle (1–30%)
+- **Min/Max volume %** — Safe volume bounds
+- **Smoothing alpha** — How smoothly volume changes (0.0 = no smoothing, 1.0 = heavy)
+- **Update interval sec** — How often the script checks and adjusts volume
+- **Enable learning** — Whether the script learns from your manual volume changes
+
+Press **Enter** at any prompt to keep the current value. Your changes are saved to `user_preferences.json` automatically.
+
+---
+
 ## How It Works
 
 1. **Audio capture** – `sounddevice` opens the default microphone input stream and reads short chunks of PCM audio.

@@ -35,6 +35,14 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
+# Non-blocking keyboard input (Windows only)
+try:
+    import msvcrt
+
+    HAS_KEYPRESS = True
+except ImportError:
+    HAS_KEYPRESS = False
+
 import numpy as np
 import sounddevice as sd
 
@@ -666,6 +674,121 @@ class AutoVolumeAdjuster:
             )
 
     # ------------------------------------------------------------------
+    def _check_keypress(self) -> bool:
+        """Return True if the user pressed 's' (non-blocking).
+
+        On Windows, uses msvcrt to check for a keypress without pausing.
+        On other platforms, always returns False.
+        """
+        if not HAS_KEYPRESS:
+            return False
+        if msvcrt.kbhit():
+            key = msvcrt.getch().decode("utf-8", errors="ignore").lower()
+            return key == "s"
+        return False
+
+    # ------------------------------------------------------------------
+    def _show_settings_menu(self) -> None:
+        """Pause auto-adjustment and let the user change settings interactively."""
+        print("\n" + "=" * 60)
+        print("   Settings Menu (press Enter to keep current value)")
+        print("=" * 60)
+        print()
+
+        # Current values
+        print(f"1. Neutral dBFS:        {self.config.neutral_db}")
+        print(f"2. Max step %:          {self.config.max_step * 100:.0f}%")
+        print(f"3. Min volume %:        {self.config.min_volume * 100:.0f}%")
+        print(f"4. Max volume %:        {self.config.max_volume * 100:.0f}%")
+        print(f"5. Smoothing alpha:     {self.config.smoothing_alpha}")
+        print(f"6. Update interval sec: {self.config.update_interval}")
+        print(f"7. Enable learning:     {self.config.enable_learning}")
+        print()
+
+        # --- Neutral dBFS ---
+        answer = input(f"Neutral dBFS [{self.config.neutral_db}]: ").strip()
+        if answer:
+            try:
+                self.config.neutral_db = float(answer)
+            except ValueError:
+                print("  Invalid value, keeping current.")
+
+        # --- Max step % ---
+        answer = input(f"Max step % [{self.config.max_step * 100:.0f}]: ").strip()
+        if answer:
+            try:
+                val = float(answer) / 100.0
+                if 0.01 <= val <= 0.30:
+                    self.config.max_step = val
+                else:
+                    print("  Value out of range (1-30), keeping current.")
+            except ValueError:
+                print("  Invalid value, keeping current.")
+
+        # --- Min volume % ---
+        answer = input(f"Min volume % [{self.config.min_volume * 100:.0f}]: ").strip()
+        if answer:
+            try:
+                val = float(answer) / 100.0
+                if 0.0 <= val <= 1.0:
+                    self.config.min_volume = val
+                else:
+                    print("  Value out of range (0-100), keeping current.")
+            except ValueError:
+                print("  Invalid value, keeping current.")
+
+        # --- Max volume % ---
+        answer = input(f"Max volume % [{self.config.max_volume * 100:.0f}]: ").strip()
+        if answer:
+            try:
+                val = float(answer) / 100.0
+                if 0.0 <= val <= 1.0:
+                    self.config.max_volume = val
+                else:
+                    print("  Value out of range (0-100), keeping current.")
+            except ValueError:
+                print("  Invalid value, keeping current.")
+
+        # --- Smoothing alpha ---
+        answer = input(f"Smoothing alpha [{self.config.smoothing_alpha}]: ").strip()
+        if answer:
+            try:
+                val = float(answer)
+                if 0.0 <= val <= 1.0:
+                    self.config.smoothing_alpha = val
+                else:
+                    print("  Value out of range (0-1), keeping current.")
+            except ValueError:
+                print("  Invalid value, keeping current.")
+
+        # --- Update interval ---
+        answer = input(f"Update interval sec [{self.config.update_interval}]: ").strip()
+        if answer:
+            try:
+                val = float(answer)
+                if val > 0:
+                    self.config.update_interval = val
+                else:
+                    print("  Must be positive, keeping current.")
+            except ValueError:
+                print("  Invalid value, keeping current.")
+
+        # --- Enable learning ---
+        answer = input(f"Enable learning (y/n) [{'y' if self.config.enable_learning else 'n'}]: ").strip().lower()
+        if answer in ("y", "yes"):
+            self.config.enable_learning = True
+        elif answer in ("n", "no"):
+            self.config.enable_learning = False
+
+        # Save preferences
+        self.learner.save()
+        print()
+        print("Settings saved to user_preferences.json")
+        print("=" * 60)
+        print("Resuming auto-adjustment...")
+        print()
+
+    # ------------------------------------------------------------------
     def _handle_signal(self, signum, frame) -> None:  # pragma: no cover - signal
         logger.info("Received signal %s. Shutting down gracefully...", signum)
         self._running = False
@@ -685,7 +808,7 @@ class AutoVolumeAdjuster:
             logger.critical("Cannot start without a working microphone. Exiting.")
             return
 
-        logger.info("Auto Volume Adjuster is running. Press Ctrl+C to stop.")
+        logger.info("Auto Volume Adjuster is running. Press 's' for settings, Ctrl+C to stop.")
         logger.info(
             "Config: sample_rate=%d Hz, chunk=%.2fs, smoothing=%.2f, "
             "volume_bounds=[%.0f%%, %.0f%%], update_interval=%.2fs",
@@ -701,6 +824,10 @@ class AutoVolumeAdjuster:
 
         try:
             while self._running:
+                # Check for 's' keypress to open settings menu (non-blocking)
+                if self._check_keypress():
+                    self._show_settings_menu()
+
                 now = time.time()
                 if now - last_update < self.config.update_interval:
                     time.sleep(0.05)
