@@ -63,13 +63,21 @@ class Config:
     # 1.0 = heavy smoothing). Higher values react more slowly to changes.
     smoothing_alpha: float = 0.3
 
-    # Ambient noise mapping
-    min_ambient_db: float = -60.0     # Ambient dB below which volume = min_volume
-    max_ambient_db: float = -20.0     # Ambient dB above which volume = max_volume
 
     # Volume bounds (0.0 to 1.0)
     min_volume: float = 0.15          # Never go below 15%
     max_volume: float = 0.85          # Never go above 85%
+
+    # Reference ambient level where no adjustment is needed (dBFS).
+    # Louder than this -> volume increases; quieter -> volume decreases.
+    neutral_db: float = -40.0
+
+    # Maximum volume change per update cycle (0.0 to 1.0).
+    # 0.05 = at most 5% up or down per cycle.
+    max_step: float = 0.05
+
+    # Deadband (dB) around neutral_db to ignore tiny fluctuations.
+    deadband_db: float = 2.0
 
     # Update interval (seconds) between volume adjustments
     update_interval: float = 1.0
@@ -342,32 +350,49 @@ class AmbientNoiseMonitor:
 # Volume mapping logic
 # ---------------------------------------------------------------------------
 class VolumeMapper:
-    """Maps ambient noise level (dB) to a target system volume."""
+    """Adjusts system volume relative to the current level based on ambient noise.
+
+    The mapper does not set an absolute target. Instead, it looks at the
+    *current* system volume and nudges it up or down depending on how the
+    ambient noise compares to *neutral_db*.
+    """
 
     def __init__(self, config: Config) -> None:
         self.config = config
 
-    def map_db_to_volume(self, ambient_db: float) -> float:
-        """
-        Linearly interpolate ambient dB to a volume fraction between
-        min_volume and max_volume, clamped to [min_volume, max_volume].
+    def adjust_volume(self, current_volume: float, ambient_db: float) -> float:
+        """Return a new volume (clamped to [min_volume, max_volume]) starting
+        from *current_volume* and moving up or down based on *ambient_db*.
 
-        Quiet environments -> lower volume.
-        Loud environments  -> higher volume.
+        - ambient_db well above neutral_db  -> increase volume
+        - ambient_db well below neutral_db  -> decrease volume
+        - ambient_db inside the deadband    -> no change
         """
-        lo_db = self.config.min_ambient_db
-        hi_db = self.config.max_ambient_db
+        lo_db = self.config.neutral_db - self.config.deadband_db
+        hi_db = self.config.neutral_db + self.config.deadband_db
         lo_vol = self.config.min_volume
         hi_vol = self.config.max_volume
+        step = self.config.max_step
 
-        if ambient_db <= lo_db:
-            return lo_vol
-        if ambient_db >= hi_db:
-            return hi_vol
+        # Inside the deadband: keep the current volume.
+        if lo_db <= ambient_db <= hi_db:
+            return current_volume
 
-        # Linear interpolation
-        t = (ambient_db - lo_db) / (hi_db - lo_db)
-        return lo_vol + t * (hi_vol - lo_vol)
+        # Determine direction and magnitude of the nudge.
+        if ambient_db > hi_db:
+            # Louder than neutral: turn volume up.
+            # The louder it gets, the stronger the nudge (capped at max_step).
+            strength = min((ambient_db - hi_db) / max(hi_db - lo_db, 1e-6), 1.0)
+            delta = step * strength
+            new_volume = current_volume + delta
+        else:
+            # Quieter than neutral: turn volume down.
+            strength = min((lo_db - ambient_db) / max(hi_db - lo_db, 1e-6), 1.0)
+            delta = step * strength
+            new_volume = current_volume - delta
+
+        # Clamp to safe bounds.
+        return max(lo_vol, min(hi_vol, new_volume))
 
 
 # ---------------------------------------------------------------------------
@@ -439,18 +464,20 @@ class AutoVolumeAdjuster:
 
                 self._consecutive_errors = 0
                 ambient_db = AmbientNoiseMonitor.rms_to_db(rms)
-                target_volume = self.mapper.map_db_to_volume(ambient_db)
-
                 current_volume = self.controller.get_volume()
+                target_volume = self.mapper.adjust_volume(current_volume, ambient_db)
+
                 # Only adjust if the difference is meaningful (>1%) to avoid
                 # unnecessary OS calls and potential audio artifacts.
                 if abs(target_volume - current_volume) > 0.01:
                     self.controller.set_volume(target_volume)
+                    direction = "up" if target_volume > current_volume else "down"
                     logger.info(
-                        "Ambient: %6.1f dBFS | Volume: %5.1f%% -> %5.1f%%",
+                        "Ambient: %6.1f dBFS | Volume: %5.1f%% -> %5.1f%% (%s)",
                         ambient_db,
                         current_volume * 100,
                         target_volume * 100,
+                        direction,
                     )
                 else:
                     logger.debug(

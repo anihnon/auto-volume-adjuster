@@ -115,9 +115,13 @@ class Config:
     # Higher = smoother / slower reaction. 0.0 = no smoothing, 1.0 = frozen.
     smoothing_alpha: float = 0.3
 
-    # --- Ambient-noise-to-volume mapping -----------------------------------
-    min_ambient_db: float = -60.0     # Below this: volume = min_volume
-    max_ambient_db: float = -20.0     # Above this: volume = max_volume
+    # --- Relative volume adjustment ----------------------------------------
+    # Ambient dB at which no change happens. Louder -> volume up, quieter -> down.
+    neutral_db: float = -40.0
+    # Maximum volume change per cycle (0.05 = 5% max per update).
+    max_step: float = 0.05
+    # Deadband (dB) around neutral_db to ignore tiny fluctuations.
+    deadband_db: float = 2.0
 
     # --- Volume bounds (0.0 to 1.0) ----------------------------------------
     min_volume: float = 0.15          # Never go quieter than 15%
@@ -134,12 +138,12 @@ class Config:
 |------|---------------|
 | **React faster to noise changes** | Decrease `smoothing_alpha` (e.g., `0.1`) and/or `update_interval` (e.g., `0.5`). |
 | **React more slowly / avoid jitter** | Increase `smoothing_alpha` (e.g., `0.6`) and/or `update_interval` (e.g., `2.0`). |
+| **Make the script react more strongly** | Increase `max_step` (e.g., `0.1`). |
+| **Make the script less aggressive** | Decrease `max_step` (e.g., `0.02`). |
 | **Wider volume range** | Lower `min_volume` and/or raise `max_volume`. |
 | **Narrower / safer range** | Raise `min_volume` and/or lower `max_volume`. |
-| **Make the script more sensitive to quiet rooms** | Lower `min_ambient_db` (e.g., `-70`). |
-| **Make the script less aggressive in loud rooms** | Lower `max_ambient_db` (e.g., `-25`). |
 
-> **Tip:** Run the script once and watch the log output (`Ambient: XX.X dBFS | Volume: YY.Y%`) to calibrate the `min_ambient_db` and `max_ambient_db` thresholds for your specific environment and microphone.
+> **Tip:** Run the script once and watch the log output (`Ambient: XX.X dBFS | Volume: YY.Y% -> ZZ.Z% (up/down)`) to calibrate `neutral_db` for your specific environment and microphone.
 
 ---
 
