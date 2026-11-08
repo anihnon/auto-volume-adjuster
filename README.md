@@ -201,11 +201,29 @@ To reset learned preferences and start fresh:
 
 ```bash
 python main.py --reset-prefs
+```
 
 Or run the setup wizard again:
 
 ```bash
 python main.py --setup
+```
+
+### Test volume control
+
+If the script doesn't seem to change your volume, run the built-in test:
+
+```bash
+python main.py --test-volume
+```
+
+This will:
+1. Read your current system volume
+2. Try to change it by 10%
+3. Read it back to verify the change took effect
+4. Restore your original volume
+
+If the test fails, try running the script as **Administrator** (Windows) or with `sudo` (Linux/macOS), as volume control may require elevated permissions.
 
 ---
 
@@ -227,7 +245,8 @@ python main.py --setup
 |---------|--------------|----------|
 | `No default input device found` | No microphone connected or not set as default | Plug in a microphone and set it as the default recording device in OS sound settings. |
 | `Permission denied` (macOS) | Microphone access not granted | Grant microphone permission to Terminal / your IDE in *System Settings → Privacy & Security → Microphone*. |
-| Volume never changes | `neutral_db` / `deadband_db` thresholds don't match your room | Check the log for `Ambient: ... dBFS` values and adjust `neutral_db` accordingly. |
+| Volume never changes | `neutral_db` / `deadband_db` thresholds don't match your room, or volume control lacks permissions | Run `python main.py --test-volume` to verify. If it fails, run as Administrator (Windows) or with sudo (Linux/macOS). Also check the log for `[FAILED]` messages. |
+| Volume shows wrong value (e.g., 50% instead of 43%) | Volume read failed and fell back to 50% | Check the log for read errors. Run `python main.py --test-volume`. May need elevated permissions. |
 | Volume jumps erratically | `smoothing_alpha` too low | Increase `smoothing_alpha` (e.g., from `0.3` to `0.6`). |
 | `ModuleNotFoundError: No module named 'pycaw'` | Dependencies not installed | Run `pip install -r requirements.txt` inside the activated virtual environment. |
 | Linux: volume control silent | Neither `amixer` nor `pactl` found | Install ALSA or PulseAudio utilities, or run as a user with audio permissions. |

@@ -151,8 +151,16 @@ class SystemVolumeController:
 
     # ------------------------------------------------------------------
     def get_volume(self) -> float:
-        """Return current master volume as a float in range [0.0, 1.0]."""
+        """Return current master volume as a float in range [0.0, 1.0].
+
+        Logs a warning if the backend is not initialized or fails,
+        so you can see why the reported value might be wrong.
+        """
         if not self._initialized:
+            logger.warning(
+                "Volume controller not initialized (%s). Returning fallback 0.5.",
+                self.os_name,
+            )
             return 0.5
         try:
             if self.os_name == "Windows" and self._volume_handle is not None:
@@ -163,14 +171,25 @@ class SystemVolumeController:
                 return self._get_volume_linux()
         except Exception as exc:  # pragma: no cover - platform dependent
             logger.error("Failed to read system volume: %s", exc)
+            logger.warning("Returning fallback 0.5 (50%%) because read failed.")
         return 0.5
 
     # ------------------------------------------------------------------
-    def set_volume(self, volume: float) -> None:
-        """Set master volume to *volume* (float in range [0.0, 1.0])."""
+    def set_volume(self, volume: float) -> bool:
+        """Set master volume to *volume* (float in range [0.0, 1.0]).
+
+        Returns True if the volume was set and verified, False otherwise.
+        After setting, the volume is read back to confirm the OS accepted it.
+        """
         volume = max(0.0, min(1.0, volume))
         if not self._initialized:
-            return
+            logger.warning(
+                "Volume controller not initialized (%s). Cannot set volume.",
+                self.os_name,
+            )
+            return False
+
+        before = self.get_volume()
         try:
             if self.os_name == "Windows" and self._volume_handle is not None:
                 self._volume_handle.SetMasterVolumeLevelScalar(volume, None)
@@ -178,9 +197,33 @@ class SystemVolumeController:
                 self._set_volume_macos(volume)
             elif self.os_name == "Linux":
                 self._set_volume_linux(volume)
-            logger.debug("System volume set to %.0f%%", volume * 100)
+            else:
+                logger.warning("Unsupported OS: %s. Volume not set.", self.os_name)
+                return False
         except Exception as exc:  # pragma: no cover - platform dependent
             logger.error("Failed to set system volume: %s", exc)
+            return False
+
+        # Verify the change took effect by reading it back.
+        time.sleep(0.1)  # Give the OS a moment to apply
+        after = self.get_volume()
+        changed = abs(after - volume) <= 0.05  # within 5% tolerance
+
+        if changed:
+            logger.info(
+                "System volume set: %.0f%% -> %.0f%% (verified)",
+                before * 100,
+                after * 100,
+            )
+            return True
+        else:
+            logger.warning(
+                "System volume set to %.0f%% but read back as %.0f%% — "
+                "the OS may not have accepted the change.",
+                volume * 100,
+                after * 100,
+            )
+            return False
     # ------------------------------------------------------------------
     # macOS helpers (osascript)
     # ------------------------------------------------------------------
@@ -700,15 +743,24 @@ class AutoVolumeAdjuster:
                 # Only adjust if the difference is meaningful (>1%) to avoid
                 # unnecessary OS calls and potential audio artifacts.
                 if abs(target_volume - current_volume) > 0.01:
-                    self.controller.set_volume(target_volume)
+                    success = self.controller.set_volume(target_volume)
                     direction = "up" if target_volume > current_volume else "down"
-                    logger.info(
-                        "Ambient: %6.1f dBFS | Volume: %5.1f%% -> %5.1f%% (%s)",
-                        ambient_db,
-                        current_volume * 100,
-                        target_volume * 100,
-                        direction,
-                    )
+                    if success:
+                        logger.info(
+                            "Ambient: %6.1f dBFS | Volume: %5.1f%% -> %5.1f%% (%s) [OK]",
+                            ambient_db,
+                            current_volume * 100,
+                            target_volume * 100,
+                            direction,
+                        )
+                    else:
+                        logger.error(
+                            "Ambient: %6.1f dBFS | Volume: %5.1f%% -> %5.1f%% (%s) [FAILED]",
+                            ambient_db,
+                            current_volume * 100,
+                            target_volume * 100,
+                            direction,
+                        )
                 else:
                     logger.debug(
                         "Ambient: %6.1f dBFS | Volume unchanged (%.1f%%)",
@@ -743,7 +795,38 @@ def main() -> int:
         action="store_true",
         help="Delete saved preferences and start fresh.",
     )
+    parser.add_argument(
+        "--test-volume",
+        action="store_true",
+        help="Test that reading and writing system volume works, then exit.",
+    )
     args = parser.parse_args()
+
+    # Handle test volume mode
+    if args.test_volume:
+        controller = SystemVolumeController()
+        if not controller._initialized:
+            print("ERROR: Volume controller could not be initialized.")
+            print(f"OS: {controller.os_name}")
+            return 1
+        current = controller.get_volume()
+        print(f"Current system volume: {current * 100:.0f}%")
+        test_vol = max(0.1, min(0.9, current + 0.10))  # nudge by 10%
+        print(f"Testing volume change: {current * 100:.0f}% -> {test_vol * 100:.0f}%")
+        success = controller.set_volume(test_vol)
+        time.sleep(0.5)
+        after = controller.get_volume()
+        print(f"Volume after set: {after * 100:.0f}%")
+        if success and abs(after - test_vol) <= 0.05:
+            print("SUCCESS: Volume control is working correctly.")
+            # Restore original volume
+            controller.set_volume(current)
+            print(f"Restored original volume: {current * 100:.0f}%")
+            return 0
+        else:
+            print("FAILED: Volume control is not working as expected.")
+            print("Try running as Administrator / with elevated permissions.")
+            return 1
 
     # Handle reset preferences
     if args.reset_prefs:
