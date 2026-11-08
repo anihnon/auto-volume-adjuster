@@ -29,7 +29,10 @@ import time
 import signal
 import logging
 import platform
-from dataclasses import dataclass
+import json
+import argparse
+from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -84,6 +87,14 @@ class Config:
 
     # How many consecutive failures before giving up
     max_consecutive_errors: int = 5
+
+    # --- Learning / preference settings ------------------------------------
+    # File where learned user preferences are stored
+    preferences_file: str = "user_preferences.json"
+    # Enable learning from manual volume changes
+    enable_learning: bool = True
+    # How strongly to adapt to user changes (0.0 = no adaptation, 1.0 = full)
+    learning_rate: float = 0.3
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +371,9 @@ class VolumeMapper:
     def __init__(self, config: Config) -> None:
         self.config = config
 
-    def adjust_volume(self, current_volume: float, ambient_db: float) -> float:
+    def adjust_volume(
+        self, current_volume: float, ambient_db: float, neutral_db: Optional[float] = None
+    ) -> float:
         """Return a new volume (clamped to [min_volume, max_volume]) starting
         from *current_volume* and moving up or down based on *ambient_db*.
 
@@ -368,8 +381,9 @@ class VolumeMapper:
         - ambient_db well below neutral_db  -> decrease volume
         - ambient_db inside the deadband    -> no change
         """
-        lo_db = self.config.neutral_db - self.config.deadband_db
-        hi_db = self.config.neutral_db + self.config.deadband_db
+        effective_neutral = neutral_db if neutral_db is not None else self.config.neutral_db
+        lo_db = effective_neutral - self.config.deadband_db
+        hi_db = effective_neutral + self.config.deadband_db
         lo_vol = self.config.min_volume
         hi_vol = self.config.max_volume
         step = self.config.max_step
@@ -396,6 +410,192 @@ class VolumeMapper:
 
 
 # ---------------------------------------------------------------------------
+# Preference learning system
+# ---------------------------------------------------------------------------
+class PreferenceLearner:
+    """Learns and remembers user volume preferences over time.
+
+    Stores preferences in a JSON file so they persist between runs.
+    Tracks preferred starting volume, max adjustment %, and learned
+    neutral_db offset that adapts when the user manually changes volume.
+    """
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.preferences_path = Path(config.preferences_file)
+        self.data = self._load()
+        self._last_manual_volume: Optional[float] = None
+
+    # ------------------------------------------------------------------
+    def _load(self) -> dict:
+        """Load preferences from disk, returning defaults if missing."""
+        defaults = {
+            "preferred_start_volume": None,
+            "preferred_max_adjustment_percent": None,
+            "learned_neutral_db_offset": 0.0,
+            "manual_adjustment_count": 0,
+            "last_updated": None,
+        }
+        if self.preferences_path.exists():
+            try:
+                with open(self.preferences_path, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                defaults.update(saved)
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("Could not read preferences file: %s", exc)
+        return defaults
+
+    # ------------------------------------------------------------------
+    def save(self) -> None:
+        """Persist current preferences to disk."""
+        self.data["last_updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with open(self.preferences_path, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, indent=2)
+        except OSError as exc:
+            logger.warning("Could not save preferences file: %s", exc)
+
+    # ------------------------------------------------------------------
+    def get_effective_neutral_db(self) -> float:
+        """Return the neutral dBFS adjusted by learned user offset."""
+        return self.config.neutral_db + self.data.get("learned_neutral_db_offset", 0.0)
+
+    # ------------------------------------------------------------------
+    def record_manual_adjustment(self, old_volume: float, new_volume: float) -> None:
+        """Called when the user manually changes system volume while running.
+
+        Updates the learned neutral_db offset so future automatic
+        adjustments drift toward the user's preferred level.
+        """
+        if not self.config.enable_learning:
+            return
+
+        delta = new_volume - old_volume
+        if abs(delta) < 0.01:
+            return
+
+        offset = self.data.get("learned_neutral_db_offset", 0.0)
+        offset += delta * self.config.learning_rate
+        offset = max(-0.4, min(0.4, offset))
+        self.data["learned_neutral_db_offset"] = offset
+        self.data["manual_adjustment_count"] = (
+            self.data.get("manual_adjustment_count", 0) + 1
+        )
+        self._last_manual_volume = new_volume
+        self.save()
+        logger.info(
+            "Learned from manual adjustment: neutral_db offset -> %.3f",
+            offset,
+        )
+
+    # ------------------------------------------------------------------
+    def set_start_volume(self, volume: float) -> None:
+        """Save the user's preferred starting volume."""
+        self.data["preferred_start_volume"] = volume
+        self.save()
+
+    # ------------------------------------------------------------------
+    def set_max_adjustment(self, percent: float) -> None:
+        """Save the user's preferred maximum adjustment percentage."""
+        self.data["preferred_max_adjustment_percent"] = percent
+        self.save()
+
+    # ------------------------------------------------------------------
+    def get_start_volume(self) -> Optional[float]:
+        return self.data.get("preferred_start_volume")
+
+    # ------------------------------------------------------------------
+    def get_max_adjustment_percent(self) -> Optional[float]:
+        return self.data.get("preferred_max_adjustment_percent")
+
+
+# ---------------------------------------------------------------------------
+# Interactive first-time setup
+# ---------------------------------------------------------------------------
+def run_interactive_setup(config: Config, learner: PreferenceLearner) -> Config:
+    """Walk the user through initial configuration.
+
+    Asks for preferred starting volume, max adjustment %, and neutral dBFS.
+    """
+    print("\n" + "=" * 60)
+    print("   Auto Volume Adjuster - First Time Setup")
+    print("=" * 60)
+    print()
+    print("This script automatically adjusts system volume based on")
+    print("ambient background noise.")
+    print()
+
+    controller = SystemVolumeController()
+    current_vol = controller.get_volume()
+    print(f"Your current system volume is: {current_vol * 100:.0f}%")
+    print()
+
+    # --- Preferred starting volume ---
+    while True:
+        try:
+            answer = input(
+                f"Set starting volume % (Enter to keep {current_vol * 100:.0f}%): "
+            ).strip()
+            if answer == "":
+                start_vol = current_vol
+                break
+            start_vol = float(answer) / 100.0
+            if 0.0 <= start_vol <= 1.0:
+                break
+            print("Please enter a value between 0 and 100.")
+        except ValueError:
+            print("Please enter a valid number.")
+    config.min_volume = max(0.0, start_vol - 0.10)
+    config.max_volume = min(1.0, start_vol + 0.10)
+    learner.set_start_volume(start_vol)
+    print(f"Starting volume: {start_vol * 100:.0f}%")
+    print(f"Safe bounds: {config.min_volume * 100:.0f}% - {config.max_volume * 100:.0f}%")
+    print()
+
+    # --- Max adjustment percentage ---
+    while True:
+        try:
+            answer = input("Max adjustment per cycle % (default 5, range 1-30): ").strip()
+            if answer == "":
+                max_step = 0.05
+                break
+            max_step = float(answer) / 100.0
+            if 0.01 <= max_step <= 0.30:
+                break
+            print("Please enter a value between 1 and 30.")
+        except ValueError:
+            print("Please enter a valid number.")
+    config.max_step = max_step
+    learner.set_max_adjustment(max_step * 100)
+    print(f"Max adjustment per cycle: {max_step * 100:.0f}%")
+    print()
+
+    # --- Neutral dB reference ---
+    print("Ambient noise reference (neutral dBFS):")
+    print("  Quiet room:   -50 to -60")
+    print("  Normal office: -40 to -50")
+    print("  Noisy room:   -30 to -40")
+    while True:
+        try:
+            answer = input("Neutral dBFS (default -40): ").strip()
+            if answer == "":
+                config.neutral_db = -40.0
+                break
+            config.neutral_db = float(answer)
+            break
+        except ValueError:
+            print("Please enter a valid number.")
+    print(f"Neutral dBFS: {config.neutral_db}")
+    print()
+
+    learner.save()
+    print("Setup complete! Preferences saved to user_preferences.json")
+    print("=" * 60)
+    print()
+    return config
+
+
+# ---------------------------------------------------------------------------
 # Main application
 # ---------------------------------------------------------------------------
 class AutoVolumeAdjuster:
@@ -406,8 +606,22 @@ class AutoVolumeAdjuster:
         self.controller = SystemVolumeController()
         self.monitor = AmbientNoiseMonitor(self.config)
         self.mapper = VolumeMapper(self.config)
+        self.learner = PreferenceLearner(self.config)
         self._running = False
         self._consecutive_errors = 0
+        self._last_system_volume: Optional[float] = None
+
+        # Apply learned preferences to config
+        start_vol = self.learner.get_start_volume()
+        if start_vol is not None:
+            self.config.min_volume = max(0.0, start_vol - 0.10)
+            self.config.max_volume = min(1.0, start_vol + 0.10)
+            logger.info(
+                "Loaded preferred start volume: %.0f%% (bounds: %.0f%%-%.0f%%)",
+                start_vol * 100,
+                self.config.min_volume * 100,
+                self.config.max_volume * 100,
+            )
 
     # ------------------------------------------------------------------
     def _handle_signal(self, signum, frame) -> None:  # pragma: no cover - signal
@@ -465,7 +679,23 @@ class AutoVolumeAdjuster:
                 self._consecutive_errors = 0
                 ambient_db = AmbientNoiseMonitor.rms_to_db(rms)
                 current_volume = self.controller.get_volume()
-                target_volume = self.mapper.adjust_volume(current_volume, ambient_db)
+                effective_neutral = self.learner.get_effective_neutral_db()
+                target_volume = self.mapper.adjust_volume(
+                    current_volume, ambient_db, neutral_db=effective_neutral
+                )
+
+                # Detect manual volume changes by the user since last cycle.
+                if (
+                    self._last_system_volume is not None
+                    and self.config.enable_learning
+                    and abs(current_volume - self._last_system_volume) > 0.01
+                    and abs(current_volume - target_volume) > 0.01
+                ):
+                    # The system volume differs from both what we had and
+                    # what we wanted to set -> user manually adjusted it.
+                    self.learner.record_manual_adjustment(
+                        self._last_system_volume, current_volume
+                    )
 
                 # Only adjust if the difference is meaningful (>1%) to avoid
                 # unnecessary OS calls and potential audio artifacts.
@@ -486,6 +716,7 @@ class AutoVolumeAdjuster:
                         current_volume * 100,
                     )
 
+                self._last_system_volume = self.controller.get_volume()
                 last_update = now
 
         finally:
@@ -498,8 +729,40 @@ class AutoVolumeAdjuster:
 # ---------------------------------------------------------------------------
 def main() -> int:
     """Entry point for the application."""
+    parser = argparse.ArgumentParser(
+        description="Auto Volume Adjuster - dynamically adjusts system volume "
+        "based on ambient background noise."
+    )
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Run interactive first-time setup to configure preferences.",
+    )
+    parser.add_argument(
+        "--reset-prefs",
+        action="store_true",
+        help="Delete saved preferences and start fresh.",
+    )
+    args = parser.parse_args()
+
+    # Handle reset preferences
+    if args.reset_prefs:
+        prefs_path = Path("user_preferences.json")
+        if prefs_path.exists():
+            prefs_path.unlink()
+            print("Preferences reset. Run without --reset-prefs to set up again.")
+        return 0
+
+    config = Config()
+
+    # First-run detection: if no preferences file exists, run setup
+    prefs_path = Path(config.preferences_file)
+    if args.setup or not prefs_path.exists():
+        learner = PreferenceLearner(config)
+        config = run_interactive_setup(config, learner)
+
     try:
-        app = AutoVolumeAdjuster()
+        app = AutoVolumeAdjuster(config)
         app.run()
         return 0
     except KeyboardInterrupt:

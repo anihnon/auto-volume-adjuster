@@ -30,6 +30,9 @@ relative to the environment.
 | **Graceful shutdown** | Clean exit on `Ctrl+C` (SIGINT) and `SIGTERM`. |
 | **Error handling** | Handles missing microphones, permission errors, and device failures. |
 | **Configurable** | Sensitivity, update interval, and volume bounds are all user-configurable. |
+| **One-click launcher** | `run.bat` (Windows) / `run.sh` (Mac/Linux) opens a terminal and starts the script. |
+| **Interactive setup** | First-run wizard asks for your preferred starting volume, max adjustment %, and noise reference. |
+| **Preference learning** | Remembers your choices in `user_preferences.json` and adapts when you manually change volume. |
 
 ---
 
@@ -73,7 +76,6 @@ relative to the environment.
 ```bash
 git clone https://github.com/<your-username>/auto-volume-adjuster.git
 cd auto-volume-adjuster
-```
 
 ### 2. Create and activate a virtual environment (recommended)
 
@@ -88,13 +90,11 @@ python -m venv .venv
 .venv\Scripts\activate.bat
 #   macOS / Linux:
 source .venv/bin/activate
-```
 
 ### 3. Install dependencies
 
 ```bash
 pip install -r requirements.txt
-```
 
 ---
 
@@ -130,7 +130,6 @@ class Config:
     # --- Timing ------------------------------------------------------------
     update_interval: float = 1.0      # Seconds between volume adjustments
     max_consecutive_errors: int = 5   # Give up after N mic read failures
-```
 
 ### Tuning guide
 
@@ -153,11 +152,9 @@ Run the script from the repository root:
 
 ```bash
 python main.py
-```
 
 Example output:
 
-```
 2026-08-11 14:32:01 [INFO] Microphone stream started (device: default)
 2026-08-11 14:32:01 [INFO] Auto Volume Adjuster is running. Press Ctrl+C to stop.
 2026-08-11 14:32:01 [INFO] Config: sample_rate=44100 Hz, chunk=0.50s, smoothing=0.30, volume_bounds=[15%, 85%], update_interval=1.00s
@@ -168,9 +165,47 @@ Example output:
 ^C2026-08-11 14:32:10 [INFO] Received signal 2. Shutting down gracefully...
 2026-08-11 14:32:10 [INFO] Microphone stream stopped.
 2026-08-11 14:32:10 [INFO] Auto Volume Adjuster stopped.
-```
 
 Press **Ctrl+C** at any time to stop the program cleanly.
+
+---
+
+## One-Click Launcher
+
+You can start the script by double-clicking a launcher file — no terminal commands needed:
+
+| File | Platform | How to use |
+|------|----------|------------|
+| `run.bat` | Windows | Double-click, or run from Command Prompt / PowerShell |
+| `run.sh` | macOS / Linux | Double-click, or run `./run.sh` from Terminal |
+
+The launcher opens a terminal window and runs `main.py`. On the very first run, it launches the **interactive setup wizard** where you choose:
+
+1. **Starting volume %** — The volume level you want to begin from (defaults to your current system volume).
+2. **Max adjustment %** — How aggressively the script may raise or lower volume each cycle (default: 5%).
+3. **Neutral dBFS** — The ambient noise level at which no adjustment is needed.
+
+Your choices are saved to `user_preferences.json` and loaded automatically on future runs.
+
+---
+
+## Preference Learning
+
+The script learns from you over time:
+
+- **Remembers your starting volume** — On subsequent launches, it restores your previously chosen starting volume and safe bounds.
+- **Adapts to manual changes** — If you manually adjust the system volume while the script is running (e.g., using your keyboard media keys or system tray), the script detects the change and updates its internal "neutral" reference. Over time, it drifts toward the volume levels you personally prefer.
+- **Persistent storage** — All learned preferences are stored in `user_preferences.json` (ignored by Git, so your data stays private).
+
+To reset learned preferences and start fresh:
+
+```bash
+python main.py --reset-prefs
+
+Or run the setup wizard again:
+
+```bash
+python main.py --setup
 
 ---
 
@@ -179,9 +214,10 @@ Press **Ctrl+C** at any time to stop the program cleanly.
 1. **Audio capture** – `sounddevice` opens the default microphone input stream and reads short chunks of PCM audio.
 2. **Level measurement** – The Root Mean Square (RMS) of each chunk is computed and converted to dBFS (decibels relative to full scale).
 3. **Smoothing** – An exponential moving average filters out short-lived spikes so volume changes are gradual.
-4. **Mapping** – The smoothed dBFS value is linearly interpolated between `min_ambient_db` and `max_ambient_db` to produce a target volume between `min_volume` and `max_volume`.
-5. **OS adjustment** – The platform-specific backend sets the system master volume only when the change exceeds 1%, avoiding unnecessary audio interruptions.
-6. **Loop** – Steps 1–5 repeat every `update_interval` seconds until interrupted.
+4. **Relative adjustment** – The script looks at the *current* system volume and nudges it up or down based on how ambient noise compares to your neutral dBFS reference. Louder environment → volume goes up; quieter → volume goes down.
+5. **Learning** – If you manually change the volume while the script runs, it detects the difference and adjusts its internal reference so future automatic adjustments better match your personal preference.
+6. **OS adjustment** – The platform-specific backend sets the system master volume only when the change exceeds 1%, avoiding unnecessary audio interruptions.
+7. **Loop** – Steps 1–6 repeat every `update_interval` seconds until interrupted.
 
 ---
 
@@ -191,7 +227,7 @@ Press **Ctrl+C** at any time to stop the program cleanly.
 |---------|--------------|----------|
 | `No default input device found` | No microphone connected or not set as default | Plug in a microphone and set it as the default recording device in OS sound settings. |
 | `Permission denied` (macOS) | Microphone access not granted | Grant microphone permission to Terminal / your IDE in *System Settings → Privacy & Security → Microphone*. |
-| Volume never changes | `min_ambient_db` / `max_ambient_db` thresholds don't match your room | Check the log for `Ambient: ... dBFS` values and adjust the thresholds accordingly. |
+| Volume never changes | `neutral_db` / `deadband_db` thresholds don't match your room | Check the log for `Ambient: ... dBFS` values and adjust `neutral_db` accordingly. |
 | Volume jumps erratically | `smoothing_alpha` too low | Increase `smoothing_alpha` (e.g., from `0.3` to `0.6`). |
 | `ModuleNotFoundError: No module named 'pycaw'` | Dependencies not installed | Run `pip install -r requirements.txt` inside the activated virtual environment. |
 | Linux: volume control silent | Neither `amixer` nor `pactl` found | Install ALSA or PulseAudio utilities, or run as a user with audio permissions. |

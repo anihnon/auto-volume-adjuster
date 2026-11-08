@@ -125,7 +125,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# OS-generated files
+# User-specific preferences (learned settings)
+user_preferences.json
+*.json
 .DS_Store
 .DS_Store?
 ._*
