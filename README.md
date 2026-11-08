@@ -248,9 +248,26 @@ Press **Enter** at any prompt to keep the current value. Your changes are saved 
 2. **Level measurement** – The Root Mean Square (RMS) of each chunk is computed and converted to dBFS (decibels relative to full scale).
 3. **Smoothing** – An exponential moving average filters out short-lived spikes so volume changes are gradual.
 4. **Relative adjustment** – The script looks at the *current* system volume and nudges it up or down based on how ambient noise compares to your neutral dBFS reference. Louder environment → volume goes up; quieter → volume goes down.
-5. **Learning** – If you manually change the volume while the script runs, it detects the difference and adjusts its internal reference so future automatic adjustments better match your personal preference.
-6. **OS adjustment** – The platform-specific backend sets the system master volume only when the change exceeds 1%, avoiding unnecessary audio interruptions.
-7. **Loop** – Steps 1–6 repeat every `update_interval` seconds until interrupted.
+5. **Feedback detection** – If the script just raised the volume and ambient dB immediately jumps up, it detects that the microphone is picking up the computer's own sound (not real background noise) and skips further increases. This prevents a runaway feedback loop.
+6. **Learning** – If you manually change the volume while the script runs, it detects the difference and adjusts its internal reference so future automatic adjustments better match your personal preference.
+7. **OS adjustment** – The platform-specific backend sets the system master volume only when the change exceeds 1%, avoiding unnecessary audio interruptions.
+8. **Loop** – Steps 1–7 repeat every `update_interval` seconds until interrupted.
+
+---
+
+## Feedback Loop Prevention
+
+If your microphone picks up your computer's speakers, the script can get caught in a loop: volume goes up → microphone hears louder computer sound → script thinks room is noisier → volume goes up more. To prevent this:
+
+- **Noise floor calibration** – During first-time setup, the script measures your room's baseline noise level for 3 seconds.
+- **Feedback detection** – If volume was just increased and ambient dB rises by more than `feedback_db_threshold` (default: 6 dB) on the next read, the script skips the increase and logs a warning.
+- **Consecutive increase limit** – The script stops automatically increasing volume after `max_consecutive_increases` (default: 4) cycles in a row.
+
+If you still experience feedback, try:
+- Moving the microphone away from speakers
+- Lowering `max_step` (e.g., to 2–3%)
+- Raising `deadband_db` (e.g., to 4–5 dB)
+- Using headphones instead of speakers
 
 ---
 

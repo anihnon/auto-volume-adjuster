@@ -90,6 +90,21 @@ class Config:
     # Deadband (dB) around neutral_db to ignore tiny fluctuations.
     deadband_db: float = 2.0
 
+    # --- Feedback loop detection -----------------------------------------
+    # If we just raised volume and ambient dB increases by this much or more
+    # on the next read, it's likely the computer's own sound being picked up
+    # by the microphone (feedback loop), not real background noise.
+    feedback_detection_enabled: bool = True
+    feedback_db_threshold: float = 6.0        # dB increase that triggers feedback detection
+
+    # Maximum number of consecutive automatic volume increases before
+    # the script stops increasing (prevents runaway feedback).
+    max_consecutive_increases: int = 4
+
+    # How many dB above the measured baseline noise floor must ambient
+    # be before the script considers increasing volume. Set during setup.
+    noise_floor_db: Optional[float] = None
+
     # Update interval (seconds) between volume adjustments
     update_interval: float = 1.0
 
@@ -638,6 +653,32 @@ def run_interactive_setup(config: Config, learner: PreferenceLearner) -> Config:
     print(f"Neutral dBFS: {config.neutral_db}")
     print()
 
+    # --- Measure baseline noise floor ----------------------------------
+    print("Measuring baseline noise level (please stay quiet for 3 seconds)...")
+    try:
+        monitor = AmbientNoiseMonitor(config)
+        monitor.start()
+        time.sleep(3.0)
+        readings = []
+        for _ in range(5):
+            rms = monitor.read_rms()
+            if rms is not None:
+                readings.append(AmbientNoiseMonitor.rms_to_db(rms))
+            time.sleep(0.3)
+        monitor.stop()
+        if readings:
+            config.noise_floor_db = sum(readings) / len(readings)
+            logger.info(
+                "Baseline noise floor measured: %.1f dBFS", config.noise_floor_db
+            )
+            print(f"Baseline noise floor: {config.noise_floor_db:.1f} dBFS")
+        else:
+            print("Could not measure baseline noise floor.")
+    except Exception as exc:
+        logger.warning("Baseline noise measurement failed: %s", exc)
+        print("Could not measure baseline noise floor.")
+    print()
+
     learner.save()
     print("Setup complete! Preferences saved to user_preferences.json")
     print("=" * 60)
@@ -660,6 +701,9 @@ class AutoVolumeAdjuster:
         self._running = False
         self._consecutive_errors = 0
         self._last_system_volume: Optional[float] = None
+        self._last_adjustment_delta: float = 0.0
+        self._last_ambient_db: Optional[float] = None
+        self._consecutive_auto_increases: int = 0
 
         # Apply learned preferences to config
         start_vol = self.learner.get_start_volume()
@@ -866,26 +910,75 @@ class AutoVolumeAdjuster:
                         self._last_system_volume, current_volume
                     )
 
+                # --- Feedback loop detection -------------------------------
+                # If we just raised volume and ambient dB jumped right after,
+                # it's likely the computer's own sound being picked up by the
+                # microphone, not real background noise. Don't increase again.
+                feedback_detected = False
+                if (
+                    self.config.feedback_detection_enabled
+                    and self._last_adjustment_delta > 0
+                    and self._last_ambient_db is not None
+                    and ambient_db - self._last_ambient_db
+                    >= self.config.feedback_db_threshold
+                ):
+                    feedback_detected = True
+                    self._consecutive_auto_increases = 0
+                    logger.warning(
+                        "Feedback detected: volume up %.0f%% → ambient dB rose %.1f dB. "
+                        "Skipping increase to avoid feedback loop.",
+                        self._last_adjustment_delta * 100,
+                        ambient_db - self._last_ambient_db,
+                    )
+
+                # Track consecutive automatic increases to prevent runaway.
+                if not feedback_detected and target_volume > current_volume:
+                    self._consecutive_auto_increases += 1
+                elif target_volume < current_volume:
+                    self._consecutive_auto_increases = 0
+
                 # Only adjust if the difference is meaningful (>1%) to avoid
                 # unnecessary OS calls and potential audio artifacts.
                 if abs(target_volume - current_volume) > 0.01:
-                    success = self.controller.set_volume(target_volume)
-                    direction = "up" if target_volume > current_volume else "down"
-                    if success:
+                    # Skip increases if feedback was detected or we've
+                    # increased too many times in a row automatically.
+                    skip_increase = False
+                    if feedback_detected and target_volume > current_volume:
+                        skip_increase = True
+                    if (
+                        self._consecutive_auto_increases
+                        > self.config.max_consecutive_increases
+                        and target_volume > current_volume
+                    ):
+                        skip_increase = True
                         logger.info(
-                            "Ambient: %6.1f dBFS | Volume: %5.1f%% -> %5.1f%% (%s) [OK]",
-                            ambient_db,
-                            current_volume * 100,
-                            target_volume * 100,
-                            direction,
+                            "Max consecutive auto-increases reached. "
+                            "Pausing volume increases."
                         )
+
+                    if not skip_increase:
+                        success = self.controller.set_volume(target_volume)
+                        direction = "up" if target_volume > current_volume else "down"
+                        if success:
+                            logger.info(
+                                "Ambient: %6.1f dBFS | Volume: %5.1f%% -> %5.1f%% (%s) [OK]",
+                                ambient_db,
+                                current_volume * 100,
+                                target_volume * 100,
+                                direction,
+                            )
+                        else:
+                            logger.error(
+                                "Ambient: %6.1f dBFS | Volume: %5.1f%% -> %5.1f%% (%s) [FAILED]",
+                                ambient_db,
+                                current_volume * 100,
+                                target_volume * 100,
+                                direction,
+                            )
                     else:
-                        logger.error(
-                            "Ambient: %6.1f dBFS | Volume: %5.1f%% -> %5.1f%% (%s) [FAILED]",
+                        logger.debug(
+                            "Ambient: %6.1f dBFS | Increase skipped (feedback/limit)",
                             ambient_db,
-                            current_volume * 100,
-                            target_volume * 100,
-                            direction,
                         )
                 else:
                     logger.debug(
@@ -894,6 +987,9 @@ class AutoVolumeAdjuster:
                         current_volume * 100,
                     )
 
+                # Store state for next cycle's feedback detection.
+                self._last_adjustment_delta = target_volume - current_volume
+                self._last_ambient_db = ambient_db
                 self._last_system_volume = self.controller.get_volume()
                 last_update = now
 
