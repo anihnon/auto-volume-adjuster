@@ -128,16 +128,15 @@ class SystemVolumeController:
 
     # ------------------------------------------------------------------
     def _init_windows(self) -> None:  # pragma: no cover - Windows only
-        """Initialise pycaw on Windows."""
-        from ctypes import cast, POINTER
-        from comtypes import CLSCTX_ALL
-        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+        """Initialise pycaw on Windows.
+
+        Uses the pycaw AudioDevice.EndpointVolume property which is already
+        a POINTER(IAudioEndpointVolume) — no manual Activate() needed.
+        """
+        from pycaw.pycaw import AudioUtilities
 
         devices = AudioUtilities.GetSpeakers()
-        interface = devices.Activate(
-            IAudioEndpointVolume._iid_, CLSCTX_ALL, None
-        )
-        self._volume_handle = cast(interface, POINTER(IAudioEndpointVolume))
+        self._volume_handle = devices.EndpointVolume
 
     # ------------------------------------------------------------------
     def _init_macos(self) -> None:  # pragma: no cover - macOS only
