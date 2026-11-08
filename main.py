@@ -105,6 +105,22 @@ class Config:
     # be before the script considers increasing volume. Set during setup.
     noise_floor_db: Optional[float] = None
 
+    # How long (seconds) to ignore volume increases after the script
+    # itself raised the volume. While cooling down the microphone may be
+    # picking up the computer's own louder output rather than real
+    # background noise, so further increases are suppressed.
+    feedback_cooldown_sec: float = 1.5
+
+    # Ambient dB must exceed the measured baseline noise floor by this
+    # margin before the script is allowed to increase volume. This makes
+    # the script react to real background noise, not the computer's own
+    # hum or output leaking into the microphone.
+    noise_floor_margin_db: float = 4.0
+
+    # Absolute ceiling for automatic volume adjustments. Prevents runaway
+    # hikes to 100% even when preferences request a higher maximum.
+    max_volume_hard_cap: float = 0.90
+
     # Update interval (seconds) between volume adjustments
     update_interval: float = 1.0
 
@@ -704,12 +720,23 @@ class AutoVolumeAdjuster:
         self._last_adjustment_delta: float = 0.0
         self._last_ambient_db: Optional[float] = None
         self._consecutive_auto_increases: int = 0
+        # Time of the last volume increase triggered by this script. Used
+        # for a feedback cooldown: after we raise volume, the microphone
+        # may pick up the computer's own louder output, so we suppress
+        # further increases for feedback_cooldown_sec.
+        self._last_volume_up_time: Optional[float] = None
+
 
         # Apply learned preferences to config
         start_vol = self.learner.get_start_volume()
         if start_vol is not None:
             self.config.min_volume = max(0.0, start_vol - 0.10)
             self.config.max_volume = min(1.0, start_vol + 0.10)
+            # Apply hard cap so automatic adjustments cannot run away to
+            # 100%, then keep bounds ordered (min <= max).
+            self.config.max_volume = min(self.config.max_volume, self.config.max_volume_hard_cap)
+            self.config.min_volume = min(self.config.min_volume, self.config.max_volume)
+
             logger.info(
                 "Loaded preferred start volume: %.0f%% (bounds: %.0f%%-%.0f%%)",
                 start_vol * 100,
@@ -896,6 +923,41 @@ class AutoVolumeAdjuster:
                 target_volume = self.mapper.adjust_volume(
                     current_volume, ambient_db, neutral_db=effective_neutral
                 )
+                # --- Guard against the computer's own noise ----------------
+                # After the script itself raises volume, the microphone may
+                # pick up the computer's louder output rather than real
+                # background noise. During the feedback cooldown, suppress
+                # further increases so we don't chase our own output and run
+                # volume up to 100%.
+                in_cooldown = (
+                    self._last_volume_up_time is not None
+                    and now - self._last_volume_up_time
+                    < self.config.feedback_cooldown_sec
+                )
+
+                # Only react to real background noise: ambient must exceed
+                # the measured baseline noise floor by a margin before the
+                # script is allowed to increase volume. This keeps the
+                # computer's own hum/output from triggering hikes.
+                floor = self.config.noise_floor_db
+                increase_allowed = True
+                if floor is not None and ambient_db <= floor + self.config.noise_floor_margin_db:
+                    increase_allowed = False
+
+                if (in_cooldown or not increase_allowed) and target_volume > current_volume:
+                    target_volume = current_volume
+                    if in_cooldown:
+                        remaining = self.config.feedback_cooldown_sec - (
+                            now - self._last_volume_up_time
+                        )
+                        logger.debug(
+                            "Increase suppressed (feedback cooldown, %.1fs remaining)", remaining
+                        )
+                    else:
+                        logger.debug(
+                            "Increase suppressed (ambient not above noise floor + margin)"
+                        )
+
 
                 # Detect manual volume changes by the user since last cycle.
                 if (
@@ -947,7 +1009,8 @@ class AutoVolumeAdjuster:
                         skip_increase = True
                     if (
                         self._consecutive_auto_increases
-                        > self.config.max_consecutive_increases
+                        >= self.config.max_consecutive_increases
+
                         and target_volume > current_volume
                     ):
                         skip_increase = True
@@ -958,6 +1021,9 @@ class AutoVolumeAdjuster:
 
                     if not skip_increase:
                         success = self.controller.set_volume(target_volume)
+                        if success and target_volume > current_volume:
+                            self._last_volume_up_time = now
+
                         direction = "up" if target_volume > current_volume else "down"
                         if success:
                             logger.info(

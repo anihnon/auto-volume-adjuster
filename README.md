@@ -122,6 +122,17 @@ class Config:
     max_step: float = 0.05
     # Deadband (dB) around neutral_db to ignore tiny fluctuations.
     deadband_db: float = 2.0
+    # --- Feedback / computer-noise rejection -----------------------------
+    # After the script raises volume, ignore further increases for this many
+    # seconds. The microphone may be picking up the computer's own louder
+    # output, not real background noise, so we avoid chasing it to 100%.
+    feedback_cooldown_sec: float = 1.5
+    # Ambient dB must exceed the measured baseline noise floor by this
+    # margin before the script may increase volume. Keeps the script from
+    # reacting to the computer's own hum/output leaking into the mic.
+    noise_floor_margin_db: float = 4.0
+    # Absolute ceiling for automatic adjustments; never runs to 100%.
+    max_volume_hard_cap: float = 0.90
 
     # --- Volume bounds (0.0 to 1.0) ----------------------------------------
     min_volume: float = 0.15          # Never go quieter than 15%
@@ -141,6 +152,8 @@ class Config:
 | **Make the script less aggressive** | Decrease `max_step` (e.g., `0.02`). |
 | **Wider volume range** | Lower `min_volume` and/or raise `max_volume`. |
 | **Narrower / safer range** | Raise `min_volume` and/or lower `max_volume`. |
+| **Stop volume hiking to 100%** | Lower `max_volume_hard_cap` (default `0.90`) and/or `max_step`. |
+| **Ignore the computer's own noise** | Raise `noise_floor_margin_db` (needs louder real background noise to increase) and/or `feedback_cooldown_sec` (longer pause after a volume-up). |
 
 > **Tip:** Run the script once and watch the log output (`Ambient: XX.X dBFS | Volume: YY.Y% -> ZZ.Z% (up/down)`) to calibrate `neutral_db` for your specific environment and microphone.
 
@@ -259,9 +272,12 @@ Press **Enter** at any prompt to keep the current value. Your changes are saved 
 
 If your microphone picks up your computer's speakers, the script can get caught in a loop: volume goes up → microphone hears louder computer sound → script thinks room is noisier → volume goes up more. To prevent this:
 
-- **Noise floor calibration** – During first-time setup, the script measures your room's baseline noise level for 3 seconds.
-- **Feedback detection** – If volume was just increased and ambient dB rises by more than `feedback_db_threshold` (default: 6 dB) on the next read, the script skips the increase and logs a warning.
-- **Consecutive increase limit** – The script stops automatically increasing volume after `max_consecutive_increases` (default: 4) cycles in a row.
+- **Feedback cooldown** – After the script raises volume, it ignores further increases for `feedback_cooldown_sec` (default: 1.5s). This stops the script from chasing the computer's own louder output picked up by the microphone.
+- **Noise-floor gating** – During setup the script measures your room's baseline noise. Volume only increases when ambient dB is clearly above that floor (`noise_floor_margin_db`, default: 4 dB), so the computer's own hum/output never triggers a hike.
+- **Feedback detection** – If volume was just increased and ambient dB rises by more than `feedback_db_threshold` (default: 6 dB) on the next read, the script skips the increase and logs a warning (defense in depth).
+- **Consecutive increase limit** – The script stops automatically increasing after `max_consecutive_increases` (default: 4) cycles in a row.
+- **Hard volume cap** – Automatic adjustments never exceed `max_volume_hard_cap` (default: 0.90 / 90%), so volume can't run away to 100%.
+
 
 If you still experience feedback, try:
 - Moving the microphone away from speakers
