@@ -74,7 +74,7 @@ relative to the environment.
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/<your-username>/auto-volume-adjuster.git
+git clone https://github.com/anihnon/auto-volume-adjuster.git
 cd auto-volume-adjuster
 
 ### 2. Create and activate a virtual environment (recommended)
